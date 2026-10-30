@@ -132,6 +132,7 @@ import {
     UnsupportedPromptContentError,
 } from "./prompt.ts";
 import { resolveSessionTitle } from "./session-title.ts";
+import * as airSessionIndex from "./air-session-index.ts";
 import { SessionProjection, turnEndToStopReason, type HarnessEvent, type SessionUpdate } from "./translate.ts";
 import { advertisesCordis, CORDIS_CAPABILITY } from "./cordis-protocol.ts";
 import { AcpRpc, muxAcpStream } from "./rpc.ts";
@@ -2551,7 +2552,7 @@ export async function apply(ctx: Context, config: AcpBridgeConfig = {}): Promise
                         typeof requested === "number" && requested >= 1 && requested < PROTOCOL_VERSION
                             ? requested
                             : PROTOCOL_VERSION,
-                    _meta: { steering: { supported: true } },
+                    _meta: { ...airSessionIndex.initializeMeta(), steering: { supported: true } },
                     agentInfo: { name: "dsh-acp", title: "DeepSeek Harness", version: VERSION },
                     agentCapabilities: {
                         // Deep-merge: dsh.cordis and the inclusive fork capability stay siblings.
@@ -2872,41 +2873,19 @@ export async function apply(ctx: Context, config: AcpBridgeConfig = {}): Promise
                 assertOpen();
                 const persistence = requirePersistence();
                 const headers = await storedHeaders();
-                headers.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
-                const filtered = (params.cwd !== undefined && params.cwd !== null
-                    ? headers.filter((header) => header.cwd === params.cwd)
-                    : headers).filter((header) => !isSubagentHeader(header));
-                const page = filtered.slice(0, 100);
-                const projectedTitles = page.map((header) => cachedSessionTitle(header));
-                // The cache covers every listed row; only rows the cache
-                // missed fall back to reading the log, and only for the
-                // existing cost-controlled prefix.
-                const withTitles = await Promise.allSettled(
-                    page.slice(0, 20).map(async (header, index) => {
-                        if (projectedTitles[index] !== undefined) return undefined;
-                        const events = await readStoredEvents(persistence, header.id);
-                        return foldSessionTitle(events)?.title;
-                    }),
-                );
-                const sessionsInfo: SessionInfo[] = page.map((header, index) => {
-                    const settled = withTitles[index];
-                    const title = resolveSessionTitle({
-                        projcacheTitle: projectedTitles[index],
-                        logTitle: settled !== undefined && settled.status === "fulfilled" ? settled.value : undefined,
-                    });
-                    return {
-                        sessionId: String(header.id),
-                        cwd: header.cwd ?? "",
-                        ...(title !== undefined ? { title } : {}),
-                        ...(header.createdAt !== undefined
-                            ? { updatedAt: new Date(header.createdAt).toISOString() }
-                            : {}),
-                    };
+                return airSessionIndex.listSessions(params, {
+                    headers,
+                    projectedTitle: (header) => cachedSessionTitle(header),
+                    readEvents: (id) => readStoredEvents(persistence, id),
+                    foldTitle: foldSessionTitle,
+                    isSubagent: isSubagentHeader,
                 });
-                return { sessions: sessionsInfo };
             },
 
             async extMethod(method: string, params: unknown): Promise<Record<string, unknown>> {
+                if (method === "_session/archive") return airSessionIndex.archive(params);
+                if (method === "_session/unarchive") return airSessionIndex.unarchive(params);
+                if (method === "_session/rename") return airSessionIndex.rename(params);
                 if (method !== "_session/steering") throw RequestError.methodNotFound(method);
                 assertOpen();
                 const parsed = steeringRequestSchema.safeParse(params);

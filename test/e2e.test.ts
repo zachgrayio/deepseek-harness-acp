@@ -981,6 +981,15 @@ describe("dsh-acp server (e2e smoke)", () => {
             },
             jetbrains: { air: { fork: { version: 1, inclusive: true } } },
         });
+        expect(result["_meta"]).toMatchObject({
+            steering: { supported: true },
+            jetbrains: {
+                air: {
+                    version: 1,
+                    capabilities: ["sessionIndex", "sessionArchive", "sessionRename"],
+                },
+            },
+        });
         const methods = result["authMethods"] as Array<Record<string, unknown>>;
         expect(methods.length).toBeGreaterThanOrEqual(1);
         expect(methods.every((method) => method["type"] === undefined || method["type"] === "agent")).toBe(true);
@@ -1289,6 +1298,32 @@ describe("dsh-acp server (e2e smoke)", () => {
         const list = (await client.request("session/list", {})) as Record<string, unknown>;
         const sessions = list["sessions"] as Array<Record<string, unknown>>;
         expect(sessions.some((session) => session["sessionId"] === sessionId)).toBe(true);
+    }, 60_000);
+
+    it("serves the Air session index: list, rename, archive, unarchive", async () => {
+        const airList = async (archived: "unarchived" | "archived") =>
+            (await client.request("session/list", {
+                _meta: { jetbrains: { air: { version: 1, list: { limit: 200, archived } } } },
+            })) as { sessions: Array<Record<string, unknown>> };
+
+        // An untitled, never-prompted session is hidden from Air; a rename
+        // gives it the explicit title that makes it list.
+        await client.request("_session/rename", { sessionId, title: "Air session index" });
+        const renamed = await airList("unarchived");
+        const renamedRow = renamed.sessions.find((session) => session["sessionId"] === sessionId);
+        expect(renamedRow?.["title"]).toBe("Air session index");
+
+        await client.request("_session/archive", { sessionId });
+        const archived = await airList("archived");
+        const archivedRow = archived.sessions.find((session) => session["sessionId"] === sessionId);
+        expect(archivedRow?.["_meta"]).toMatchObject({ jetbrains: { air: { archived: true } } });
+        expect((await airList("unarchived")).sessions.some((session) => session["sessionId"] === sessionId)).toBe(
+            false,
+        );
+
+        await client.request("_session/unarchive", { sessionId });
+        const restored = await airList("unarchived");
+        expect(restored.sessions.some((session) => session["sessionId"] === sessionId)).toBe(true);
     }, 60_000);
 
     it("switches the Agent preset to cordis without dropping the session", async () => {
